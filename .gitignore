@@ -1,0 +1,21 @@
+node_modules
+*.zip
+
+# Build and Release Folders
+bin-debug/
+bin-release/
+[Oo]bj/
+[Bb]in/
+Screenshot-with-URL_Production/
+
+# Other files and folders
+.settings/
+.DS_Store
+./.DS_Store
+
+# Executables
+*.swf
+*.air
+*.ipa
+*.apk
+
