@@ -32,6 +32,23 @@ jobs:
       - run: npm ci
       - run: npm test
 
+            # Artifact filenames come from package.json's version, not from the tag.
+      # Tagging v1.0.1 while package.json still says 1.0.0 silently produces
+      # files named 1.0.0 inside a 1.0.1 release. Catch it before building.
+      - name: Check tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match package.json $pkg."
+            echo "Run: npm version $tag --no-git-tag-version"
+            exit 1
+          fi
+
       # Build only — electron-builder never calls the GitHub API itself. That
       # call resolved the owner from electron-builder.yml, which is how a stale
       # owner turned into a 404 that looked like a token problem.
