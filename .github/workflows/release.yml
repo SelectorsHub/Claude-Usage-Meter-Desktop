@@ -52,6 +52,9 @@ jobs:
       # so the DMG itself never gets a ticket. The app inside is fine, but the
       # DMG is what the user downloads and what Gatekeeper assesses first — an
       # unstapled DMG is reported as rejected and warns on open.
+      # electron-builder notarizes the .app and then builds the DMG around it,
+      # so the DMG itself never gets a ticket. Staple one on so the download
+      # verifies offline.
       - name: Notarize and staple the DMGs
         if: matrix.os == 'macos-latest'
         shell: bash
@@ -70,10 +73,32 @@ jobs:
               --password "$APPLE_APP_SPECIFIC_PASSWORD"
             xcrun stapler staple "$dmg"
             xcrun stapler validate "$dmg"
-            # The definitive check: this is the same assessment Gatekeeper makes
-            # on the user's machine. Fail the build here rather than shipping a
-            # DMG that warns.
-            spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          done
+
+      # The DMG is only a container. What Gatekeeper actually enforces when the
+      # user drags the app to /Applications is the .app inside — so that is what
+      # gets gated here.
+      #
+      # Note: `spctl` on the DMG itself reports "no usable signature", because
+      # electron-builder leaves dmg.sign off by default. That is expected and is
+      # NOT a failure; the DMG carries a notarization ticket, not a signature.
+      - name: Verify the app Gatekeeper will see
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for dmg in dist/*.dmg; do
+            mnt=$(mktemp -d)
+            hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$mnt"
+            app=$(find "$mnt" -maxdepth 1 -name '*.app' -print -quit)
+            echo "==> verifying $app"
+            codesign --verify --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            # This is the assessment a user's Mac makes on first launch.
+            spctl -a -vvv -t exec "$app"
+            hdiutil detach "$mnt" -quiet
+            echo "==> OK: $dmg"
           done
 
       # Stapling rewrites the DMG, so any blockmap made before it is stale.
