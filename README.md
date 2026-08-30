@@ -1,1 +1,1 @@
-# Claude-Usage-Meter---Desktop
+# Claude Usage Meter Desktop
