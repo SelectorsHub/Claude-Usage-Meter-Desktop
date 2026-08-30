@@ -8,13 +8,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  # electron-builder creates the GitHub release, which needs write access.
   contents: write
 
 jobs:
   build:
     strategy:
-      # Don't let one platform failing cancel the other's build.
       fail-fast: false
       matrix:
         include:
@@ -34,17 +32,69 @@ jobs:
       - run: npm ci
       - run: npm test
 
-      - name: Build and publish
-        run: npm run ${{ matrix.script }} -- --publish always
+      # Build only. electron-builder still writes latest.yml / latest-mac.yml
+      # because a publish provider is configured, so auto-update keeps working —
+      # but it never calls the GitHub API itself. That call was resolving the
+      # owner from electron-builder.yml, which is how a wrong or stale owner
+      # turned into a 404 that looked like a token problem.
+      - name: Build
+        run: npm run ${{ matrix.script }} -- --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing + notarization. If these secrets are unset the build
-          # still succeeds, just unsigned — users then get a Gatekeeper warning.
           CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows signing is optional; unsigned means a SmartScreen warning.
           WIN_CSC_LINK: ${{ secrets.WIN_CERT_PFX }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+
+      # electron-builder notarizes the .app and then builds the DMG around it,
+      # so the DMG itself never gets a ticket. The app inside is fine, but the
+      # DMG is what the user downloads and what Gatekeeper assesses first — an
+      # unstapled DMG is reported as rejected and warns on open.
+      - name: Notarize and staple the DMGs
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for dmg in dist/*.dmg; do
+            echo "==> notarizing $dmg"
+            xcrun notarytool submit "$dmg" --wait \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD"
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+            # The definitive check: this is the same assessment Gatekeeper makes
+            # on the user's machine. Fail the build here rather than shipping a
+            # DMG that warns.
+            spctl -a -vvv -t install "$dmg"
+          done
+
+      # Stapling rewrites the DMG, so any blockmap made before it is stale.
+      - name: Refresh blockmaps
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: rm -f dist/*.dmg.blockmap || true
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la dist/ || true
+
+      # Always targets the repo this workflow runs in — there is no owner to
+      # get wrong. Both jobs upload into the same release.
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest*.yml
+          fail_on_unmatched_files: false
