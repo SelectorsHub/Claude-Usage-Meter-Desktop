@@ -32,11 +32,9 @@ jobs:
       - run: npm ci
       - run: npm test
 
-      # Build only. electron-builder still writes latest.yml / latest-mac.yml
-      # because a publish provider is configured, so auto-update keeps working —
-      # but it never calls the GitHub API itself. That call was resolving the
-      # owner from electron-builder.yml, which is how a wrong or stale owner
-      # turned into a 404 that looked like a token problem.
+      # Build only — electron-builder never calls the GitHub API itself. That
+      # call resolved the owner from electron-builder.yml, which is how a stale
+      # owner turned into a 404 that looked like a token problem.
       - name: Build
         run: npm run ${{ matrix.script }} -- --publish never
         env:
@@ -48,10 +46,6 @@ jobs:
           WIN_CSC_LINK: ${{ secrets.WIN_CERT_PFX }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
 
-      # electron-builder notarizes the .app and then builds the DMG around it,
-      # so the DMG itself never gets a ticket. The app inside is fine, but the
-      # DMG is what the user downloads and what Gatekeeper assesses first — an
-      # unstapled DMG is reported as rejected and warns on open.
       # electron-builder notarizes the .app and then builds the DMG around it,
       # so the DMG itself never gets a ticket. Staple one on so the download
       # verifies offline.
@@ -101,12 +95,6 @@ jobs:
             echo "==> OK: $dmg"
           done
 
-      # Stapling rewrites the DMG, so any blockmap made before it is stale.
-      - name: Refresh blockmaps
-        if: matrix.os == 'macos-latest'
-        shell: bash
-        run: rm -f dist/*.dmg.blockmap || true
-
       - name: List artifacts
         shell: bash
         run: ls -la dist/ || true
@@ -117,9 +105,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          # Only what a user actually downloads. No blockmaps, no latest*.yml —
+          # nothing consumes them since the switch off electron-updater.
           files: |
             dist/*.dmg
             dist/*.exe
-            dist/*.blockmap
-            dist/latest*.yml
           fail_on_unmatched_files: false
