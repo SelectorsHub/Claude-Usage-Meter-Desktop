@@ -13,7 +13,7 @@ files:
 
 publish:
   provider: github
-  owner: selectorshub@gmail.com
+  owner: SelectorsHub
   repo: Claude-Usage-Meter-Desktop
 
 mac:
