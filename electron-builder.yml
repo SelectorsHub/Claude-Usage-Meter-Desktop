@@ -11,10 +11,8 @@ files:
   - assets/**/*
   - package.json
 
-publish:
-  provider: github
-  owner: SelectorsHub
-  repo: Claude-Usage-Meter-Desktop
+# One name shape everywhere, so re-runs overwrite instead of accumulating.
+artifactName: ${name}-${version}-${arch}.${ext}
 
 mac:
   category: public.app-category.developer-tools
@@ -31,6 +29,8 @@ mac:
   notarize: true
 
 dmg:
+  # No differential-update metadata: nothing consumes it now.
+  writeUpdateInfo: false
   contents:
     - x: 140
       y: 180
@@ -45,6 +45,8 @@ win:
       arch: [x64, arm64]
 
 nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  differentialPackage: false
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -53,6 +55,3 @@ nsis:
   # Launch straight after install so the sign-in prompt appears immediately.
   runAfterFinish: true
 
-linux:
-  target: [AppImage]
-  category: Utility

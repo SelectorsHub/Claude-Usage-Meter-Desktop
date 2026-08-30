@@ -4,13 +4,13 @@ const path = require('path');
 const {
   app, Tray, Menu, nativeImage, shell, dialog, clipboard, Notification,
 } = require('electron');
-const { autoUpdater } = require('electron-updater');
 
 const { Store } = require('./store');
 const { Fetcher, AuthError, ORIGIN } = require('./fetcher');
 const { extractMeters, LABELS, CANONICAL_ORDER } = require('./parse');
 const { History, forecast, untilReset } = require('./forecast');
 const { macTitle, tooltip, iconState, STYLE_PREVIEWS } = require('./format');
+const { checkForUpdate, notifyUpdate, openReleasesPage } = require('./update');
 
 const IS_MAC = process.platform === 'darwin';
 const STALE_AFTER = 15 * 60 * 1000;
@@ -33,6 +33,7 @@ const state = {
   lastOkAt: null,
   lastError: null,
   needsLogin: false,
+  updateAvailable: null,
 };
 
 const isStale = () => !state.lastOkAt || Date.now() - state.lastOkAt > STALE_AFTER;
@@ -198,6 +199,13 @@ function buildMenu() {
   }
   items.push({ label: 'Display', submenu: display });
 
+  if (state.updateAvailable) {
+    items.push(
+      { label: `Update to ${state.updateAvailable}…`, click: openReleasesPage },
+      { type: 'separator' },
+    );
+  }
+
   items.push(
     { label: 'Open claude.ai', click: () => shell.openExternal(ORIGIN) },
     { label: 'Sign in again…', click: signIn },
@@ -316,7 +324,16 @@ app.whenReady().then(() => {
   // Keeps the clock-relative labels ("resets in 2h 10m") honest between polls.
   setInterval(render, 30000);
 
-  autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  const runUpdateCheck = async () => {
+    const version = await checkForUpdate();
+    if (version && version !== state.updateAvailable) {
+      state.updateAvailable = version;
+      notifyUpdate(version);
+      render();
+    }
+  };
+  runUpdateCheck();
+  setInterval(runUpdateCheck, 6 * 60 * 60 * 1000);
 });
 
 app.on('second-instance', () => tray && tray.popUpContextMenu());
