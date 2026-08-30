@@ -73,7 +73,7 @@ jobs:
             # The definitive check: this is the same assessment Gatekeeper makes
             # on the user's machine. Fail the build here rather than shipping a
             # DMG that warns.
-            spctl -a -vvv -t install "$dmg"
+            spctl -a -vvv -t open --context context:primary-signature "$dmg"
           done
 
       # Stapling rewrites the DMG, so any blockmap made before it is stale.
