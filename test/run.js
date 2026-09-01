@@ -221,15 +221,22 @@ test('an unrecognised response is a parser failure, not a free plan', () => {
 
 console.log('oauth');
 
+// fetcher.js requires 'electron', which does not exist under plain node. Serve
+// a stub straight from memory rather than writing one to disk — the previous
+// version hardcoded /tmp, which on Windows resolves to a D:\tmp that is not
+// there, and the whole suite died on the CI runner.
 const Module = require('module');
-require('fs').writeFileSync('/tmp/cum-electron-stub.js',
-  'module.exports={BrowserWindow:class{},session:{fromPartition:()=>({getUserAgent:()=>"Chrome/128"})},shell:{openExternal(){}}};');
-const _resolve = Module._resolveFilename;
-Module._resolveFilename = function (q, ...a) {
-  return q === 'electron' ? require.resolve('/tmp/cum-electron-stub.js') : _resolve.call(this, q, ...a);
+const electronStub = {
+  BrowserWindow: class {},
+  session: { fromPartition: () => ({ getUserAgent: () => 'Chrome/128' }) },
+  shell: { openExternal() {} },
+};
+const _load = Module._load;
+Module._load = function (request, ...rest) {
+  return request === 'electron' ? electronStub : _load.call(this, request, ...rest);
 };
 const { hostAllowed } = require('../src/main/fetcher');
-Module._resolveFilename = _resolve;
+Module._load = _load;
 
 test('Google OAuth popups are allowed to open in-app', () => {
   assert.ok(hostAllowed('https://accounts.google.com/o/oauth2/v2/auth?client_id=x'));
