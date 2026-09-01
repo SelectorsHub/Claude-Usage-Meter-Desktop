@@ -22,6 +22,7 @@ const DEFAULTS = {
   orgUuid: null,
   startAtLogin: true,
   firstRunDone: false,
+  freeNoticeShown: false,
   settingsVersion: SETTINGS_VERSION,
 };
 

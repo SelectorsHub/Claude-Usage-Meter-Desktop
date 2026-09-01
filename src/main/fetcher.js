@@ -8,10 +8,38 @@
  * cookies, headers and origin are all the real thing.
  */
 
-const { BrowserWindow, session } = require('electron');
+const { BrowserWindow, session, shell } = require('electron');
 
 const ORIGIN = 'https://claude.ai';
 const PARTITION = 'persist:claude';
+
+// Sign-in providers whose pages must open INSIDE the app, sharing our cookie
+// jar. "Continue with Google" opens a popup via window.open; with no handler
+// registered Electron drops it, so the user clicks the button and nothing at
+// all happens — which reads exactly like "Google login doesn't work here".
+const AUTH_HOSTS = [
+  'claude.ai',
+  'anthropic.com',
+  'accounts.google.com',
+  'accounts.youtube.com',
+  'google.com',
+  'gstatic.com',
+  'appleid.apple.com',
+  'login.microsoftonline.com',
+  'login.live.com',
+];
+
+function hostAllowed(url) {
+  let host;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    host = parsed.hostname.toLowerCase();
+  } catch (err) {
+    return false;
+  }
+  return AUTH_HOSTS.some((h) => host === h || host.endsWith('.' + h));
+}
 
 // Electron's default User-Agent contains "Electron/x.y.z", which bot filters
 // flag. That produces a 403 on /api/* even with a perfectly valid cookie —
@@ -72,11 +100,60 @@ class Fetcher {
     });
     win.setMenuBarVisibility(false);
     win.webContents.setUserAgent(cleanUserAgent());
+    this.attachWindowOpenHandler(win);
     // A sign-in window the user closes shouldn't kill the app's only session.
     win.on('closed', () => {
       if (this.window === win) this.window = null;
     });
     return win;
+  }
+
+  /**
+   * Let OAuth popups open as real child windows, inside our session.
+   *
+   * Without this the Google flow simply dies. With it, the popup shares
+   * `persist:claude`, so the cookie Google sets lands in the same jar Claude
+   * then reads. Anything that isn't a sign-in provider is pushed out to the
+   * user's real browser instead of opening a browser inside our app.
+   */
+  attachWindowOpenHandler(win) {
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (!hostAllowed(url)) {
+        shell.openExternal(url);
+        return { action: 'deny' };
+      }
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 680,
+          show: true,
+          modal: false,
+          autoHideMenuBar: true,
+          title: 'Sign in',
+          webPreferences: {
+            // Same partition or the popup writes its cookies somewhere we
+            // will never read.
+            partition: PARTITION,
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+          },
+        },
+      };
+    });
+
+    // The override above cannot set a User-Agent, so do it the moment the
+    // child exists — before it has navigated anywhere.
+    win.webContents.on('did-create-window', (child) => {
+      try {
+        child.webContents.setUserAgent(cleanUserAgent());
+        child.setMenuBarVisibility(false);
+        this.attachWindowOpenHandler(child);   // Google can chain a second popup
+      } catch (err) {
+        /* window already gone */
+      }
+    });
   }
 
   async ensureWindow() {
@@ -176,10 +253,31 @@ class Fetcher {
     setTimeout(check, 2500);
   }
 
+  /**
+   * Clear the cookie jar so the next poll requires a fresh login.
+   *
+   * Uninstalling the app leaves ~/Library/Application Support/Claude Usage
+   * Meter behind, so a "fresh install" still finds a valid session and never
+   * shows the login window. This is how you actually get back to first-run.
+   */
+  async signOut() {
+    if (this.window && !this.window.isDestroyed()) this.window.destroy();
+    this.window = null;
+    this.orgUuid = null;
+    this.store.set('orgUuid', null);
+    try {
+      await session.fromPartition(PARTITION).clearStorageData({
+        storages: ['cookies', 'localstorage', 'indexdb', 'websql', 'serviceworkers', 'cachestorage'],
+      });
+    } catch (err) {
+      /* nothing to clear */
+    }
+  }
+
   destroy() {
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
     this.window = null;
   }
 }
 
-module.exports = { Fetcher, AuthError, ORIGIN, PARTITION };
+module.exports = { Fetcher, AuthError, ORIGIN, PARTITION, hostAllowed, AUTH_HOSTS };

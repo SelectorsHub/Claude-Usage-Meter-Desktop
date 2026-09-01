@@ -7,12 +7,19 @@ const {
 
 const { Store } = require('./store');
 const { Fetcher, AuthError, ORIGIN } = require('./fetcher');
-const { extractMeters, LABELS, CANONICAL_ORDER } = require('./parse');
+const { extractMeters, looksLikeFreePlan, LABELS, CANONICAL_ORDER } = require('./parse');
 const { History, forecast, untilReset } = require('./forecast');
 const { macTitle, tooltip, iconState, STYLE_PREVIEWS } = require('./format');
 const { checkForUpdate, notifyUpdate, openReleasesPage } = require('./update');
 
 const IS_MAC = process.platform === 'darwin';
+
+// The extension reads the free-plan numbers out of the chat page itself, which
+// is the one place they exist. Worth pointing at whenever this app cannot help.
+const CHROME_STORE_URL =
+  'https://chromewebstore.google.com/detail/claude-usage-tracker/kgpahkcgadpnklinijdojapiadnfelae';
+const EDGE_STORE_URL =
+  'https://microsoftedge.microsoft.com/addons/detail/claude-usage-meter/anhdhmpfpgbohohjlbgnggnmcmkmmcbn';
 const STALE_AFTER = 15 * 60 * 1000;
 const ASSETS = path.join(__dirname, '..', '..', 'assets', 'tray');
 
@@ -34,6 +41,7 @@ const state = {
   lastError: null,
   needsLogin: false,
   updateAvailable: null,
+  lastRaw: null,
 };
 
 const isStale = () => !state.lastOkAt || Date.now() - state.lastOkAt > STALE_AFTER;
@@ -75,6 +83,13 @@ async function poll() {
     if (err instanceof AuthError) {
       state.needsLogin = true;
       state.lastError = err.message;
+      // Don't sit there showing "sign in" and hope the tray gets clicked. Open
+      // the window — once per run, so a persistent failure can't spawn a stack
+      // of windows.
+      if (!state.loginPrompted) {
+        state.loginPrompted = true;
+        setTimeout(signIn, 400);
+      }
     } else {
       // A transient failure must not be reported as "signed out" — that flag is
       // only ever set by an actual server rejection.
@@ -85,6 +100,7 @@ async function poll() {
 }
 
 function applyResult(raw) {
+  state.lastRaw = raw;
   const meters = extractMeters(raw);
   const windowMinutes = store.get('forecastWindowMinutes');
   const now = Date.now() / 1000;
@@ -103,9 +119,21 @@ function applyResult(raw) {
   state.meters = meters;
   state.lastOkAt = Date.now();
   state.needsLogin = false;
-  state.lastError = meters.length
-    ? null
-    : 'No usage windows in the response. Free plans do not expose /usage.';
+  state.loginPrompted = false;
+
+  if (meters.length) {
+    state.freePlan = false;
+    state.lastError = null;
+  } else if (looksLikeFreePlan(raw)) {
+    state.freePlan = true;
+    state.lastError = null;
+    showFreePlanNotice();
+  } else {
+    // Empty but unfamiliar — that's us failing to parse, not the user's plan.
+    state.freePlan = false;
+    state.lastError = 'Signed in, but no usage windows were recognised. '
+      + 'Use "Copy raw usage JSON" and report it.';
+  }
   render();
 }
 
@@ -120,7 +148,12 @@ function schedulePolling() {
 function meterSubmenu(meter) {
   const history = state.histories.get(meter.key) || new History();
   const items = [
-    { label: `Resets ${untilReset(meter.resetsAt)}`, enabled: false },
+    {
+      label: meter.resetsAt
+        ? `Resets ${untilReset(meter.resetsAt)}`
+        : 'No reset scheduled — this limit has not started',
+      enabled: false,
+    },
     { label: forecast(meter.pct, history, meter.resetsAt), enabled: false },
   ];
   if (meter.resetsAt) {
@@ -140,6 +173,25 @@ function buildMenu() {
     items.push(
       { label: 'Not signed in', enabled: false },
       { label: 'Sign in to Claude…', click: signIn },
+      { type: 'separator' },
+    );
+  } else if (state.freePlan) {
+    items.push(
+      { label: 'Free plan — no usage data available', enabled: false },
+      { label: 'Claude publishes usage figures for paid plans only.', enabled: false },
+      { type: 'separator' },
+      {
+        label: 'Free plan? Use the browser extension',
+        submenu: [
+          { label: 'It reads your usage inside the Claude page,', enabled: false },
+          { label: 'where the free-plan numbers actually exist.', enabled: false },
+          { type: 'separator' },
+          { label: 'Add to Chrome…', click: () => shell.openExternal(CHROME_STORE_URL) },
+          { label: 'Add to Edge…', click: () => shell.openExternal(EDGE_STORE_URL) },
+        ],
+      },
+      { label: 'Upgrade your Claude plan…', click: () => shell.openExternal(ORIGIN + '/settings/billing') },
+      { label: 'Sign in with another account', click: signOut },
       { type: 'separator' },
     );
   } else if (!state.meters.length) {
@@ -209,6 +261,8 @@ function buildMenu() {
   items.push(
     { label: 'Open claude.ai', click: () => shell.openExternal(ORIGIN) },
     { label: 'Sign in again…', click: signIn },
+    { label: 'Sign out', click: signOut },
+    { label: 'Copy raw usage JSON', click: copyRawUsage },
     { label: 'Copy diagnostics', click: copyDiagnostics },
     {
       label: 'Start at login',
@@ -228,13 +282,19 @@ function render() {
   const stale = isStale();
 
   if (IS_MAC) {
-    tray.setTitle(state.needsLogin ? 'Claude — sign in' : macTitle(state.meters, store));
+    let title;
+    if (state.needsLogin) title = 'Claude — sign in';
+    else if (state.freePlan) title = 'Claude — free plan';
+    else title = macTitle(state.meters, store);
+    tray.setTitle(title);
   }
   tray.setImage(trayImage(iconState(state.meters, store, stale)));
   tray.setToolTip(
     state.needsLogin
       ? 'Claude Usage Meter — click to sign in'
-      : tooltip(state.meters, store, stale),
+      : state.freePlan
+        ? 'Claude Usage Meter — free plans have no usage data'
+        : tooltip(state.meters, store, stale),
   );
   tray.setContextMenu(buildMenu());
 }
@@ -272,6 +332,66 @@ function signIn() {
   });
 }
 
+/**
+ * Told once, clearly, then never nagged again. Someone on a free plan needs to
+ * know why the meter is empty — but they only need telling once.
+ */
+function showFreePlanNotice() {
+  if (store.get('freeNoticeShown')) return;
+  store.set('freeNoticeShown', true);
+  dialog.showMessageBox({
+    type: 'warning',
+    title: 'Claude Usage Meter',
+    message: 'This account is on the free Claude plan',
+    detail:
+      'Claude only publishes usage figures for paid plans (Pro, Max and Team). '
+      + 'On a free account the API returns no numbers, so this app has nothing '
+      + 'to display.\n\n'
+      + 'Use the free browser extension instead. The only free-plan figures '
+      + 'exist inside the Claude chat page while you are sending a message, and '
+      + 'the extension reads them there \u2014 something a background app '
+      + 'cannot do.\n\n'
+      + 'If you upgrade later, choose Refresh now and this app starts working '
+      + 'straight away.',
+    buttons: ['Get the browser extension', 'Sign in with another account', 'OK'],
+    defaultId: 0,
+    cancelId: 2,
+  }).then(({ response }) => {
+    // Chrome's listing covers Chrome, Brave and the other Chromium browsers.
+    // Edge users get their own entry in the tray menu.
+    if (response === 0) shell.openExternal(CHROME_STORE_URL);
+    else if (response === 1) signOut();
+  });
+}
+
+function signOut() {
+  fetcher.signOut().then(() => {
+    state.meters = [];
+    state.histories.clear();
+    state.lastOkAt = null;
+    state.lastRaw = null;
+    state.needsLogin = true;
+    state.lastError = null;
+    state.loginPrompted = true;
+    render();
+    signIn();
+  });
+}
+
+/**
+ * The API's shape changes without warning — a model can appear under a name we
+ * have never seen. Rather than guess at a mapping, make the payload one click
+ * away so it can be read directly.
+ */
+function copyRawUsage() {
+  if (!state.lastRaw) {
+    notify('Claude Usage Meter', 'No usage data yet — try Refresh first.');
+    return;
+  }
+  clipboard.writeText(JSON.stringify(state.lastRaw, null, 2));
+  notify('Claude Usage Meter', 'Raw usage JSON copied to clipboard.');
+}
+
 function copyDiagnostics() {
   clipboard.writeText(JSON.stringify({
     version: app.getVersion(),
@@ -294,13 +414,19 @@ function firstRun() {
     title: 'Claude Usage Meter',
     message: 'Welcome',
     detail:
-      'A window will open once so you can sign in to Claude. After that the '
+      'Requires a paid Claude plan (Pro, Max or Team). Claude does not publish '
+      + 'usage figures for free accounts \u2014 if you are on the free plan, '
+      + 'use our browser extension instead, which reads them from the Claude '
+      + 'page directly.\n\n'
+      + 'A window will open once so you can sign in to Claude. After that the '
       + 'meter runs in the background and you will not see it again.\n\n'
       + (IS_MAC
         ? 'Your usage appears in the menu bar.'
         : 'Your usage appears in the system tray — hover the icon for the numbers.'),
-    buttons: ['Sign in'],
-  }).then(signIn);
+    buttons: ['Sign in', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+  }).then(({ response }) => { if (response === 0) signIn(); });
 }
 
 // ------------------------------------------------------------------ boot
@@ -317,8 +443,23 @@ app.whenReady().then(() => {
   if (!IS_MAC) tray.on('click', () => tray.popUpContextMenu());
   render();
 
-  firstRun();
-  if (store.get('firstRunDone') && !state.needsLogin) poll();
+  // `--force-login` (or CUM_FORCE_LOGIN=1) wipes the session at boot so the
+  // login window always appears. Uninstalling does not remove the app's data
+  // directory, so a reinstall otherwise finds a live session and skips login.
+  const forceLogin = process.argv.includes('--force-login')
+    || process.env.CUM_FORCE_LOGIN === '1';
+
+  if (forceLogin) {
+    store.set('firstRunDone', false);
+    fetcher.signOut().then(() => {
+      state.needsLogin = true;
+      render();
+      firstRun();
+    });
+  } else {
+    firstRun();
+    if (store.get('firstRunDone') && !state.needsLogin) poll();
+  }
   schedulePolling();
 
   // Keeps the clock-relative labels ("resets in 2h 10m") honest between polls.

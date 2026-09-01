@@ -95,6 +95,21 @@ No Playwright. Electron already ships Chromium, so a hidden `BrowserWindow` with
 a `persist:claude` partition is the browser — and the fetch runs inside the page,
 so cookies, headers and origin are all real.
 
+## Parsing notes
+
+`limits[]` is the source of truth — it is Claude's own display list, carrying
+`kind`, `percent`, `severity` and `is_active`. Two traps:
+
+- Entries there use **`percent`**; the top-level blocks use **`utilization`**.
+  Reading only the latter skips the array entirely, which is how the Fable meter
+  went missing.
+- Model-scoped limits name their model at `scope.model.display_name`. Classify
+  without reading it and every `weekly_scoped` entry matches the generic
+  "weekly" hint and they overwrite each other.
+
+Recognised top-level windows fill any gap `limits[]` leaves; unrecognised ones
+are dropped, which is what keeps the codenames out.
+
 ## Carried over from the extension
 
 - **The pickPct rule.** REST `utilization` is 0..100; `utilization: 1` means one
@@ -110,8 +125,33 @@ so cookies, headers and origin are all real.
 
 ## Known limits
 
-- **Free plans don't work.** `/usage` returns null for unmetered accounts. The
-  extension reads the SSE `message_limit` event instead, but that only fires
-  when *you* send a message in *your* tab — a background window never sees it.
-- **~150MB installed.** That's Chromium. It's also what removes the separate
+- **Free plans are not supported.** Claude's `/usage` endpoint returns nulls for
+  unmetered accounts. The only free-plan figures live in the SSE `message_limit`
+  event inside the completion stream, which fires when *you* send a message in
+  *your* tab — a background window never sees it. The app detects this, says so
+  plainly, and points at the browser extension, which reads those numbers from
+  the page itself.
+- **~150MB installed.** That is Chromium. It is also what removes the separate
   browser dependency.
+
+## Troubleshooting
+
+**It never asks me to sign in.** Uninstalling does not remove the app's data
+directory, so a reinstall finds the old session. To get a true first run:
+
+```bash
+rm -rf ~/Library/Application\ Support/Claude\ Usage\ Meter   # macOS
+```
+
+Or use **Sign out** in the tray menu, or launch with `--force-login`.
+
+**A meter is missing, or one I don't recognise appears.** Claude ships internal
+codenames in this payload (`nimbus_quill`, `tangelo`, `cinder_cove`…) alongside
+the real windows. The parser reads the `limits[]` array, which is Claude's own
+display list, so those never surface. If something still looks wrong, use **Copy
+raw usage JSON** in the tray menu and compare against `test/fixtures/usage.json`.
+
+**Google sign-in does nothing.** `setWindowOpenHandler` in `src/main/fetcher.js`
+allows the OAuth popup. Without it Electron drops the `window.open` call
+silently and the button appears dead.
+

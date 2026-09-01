@@ -1,7 +1,7 @@
 {
   "name": "claude-usage-meter",
   "productName": "Claude Usage Meter",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Claude.ai usage in your menu bar / system tray",
   "main": "src/main/index.js",
   "author": "SelectorsHub",

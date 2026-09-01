@@ -74,10 +74,14 @@ class History {
 
 function formatDuration(seconds) {
   const total = Math.max(0, Math.round(seconds));
-  const hours = Math.floor(total / 3600);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
   const minutes = Math.floor((total % 3600) / 60);
-  if (hours && minutes) return `${hours}h ${minutes}m`;
-  if (hours) return `${hours}h`;
+
+  // The weekly window runs to ~168 hours. "161h 4m" is technically correct and
+  // completely unreadable — nobody converts that to days in their head.
+  if (days) return hours ? `${days}d ${hours}h` : `${days}d`;
+  if (hours) return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
   return `${minutes}m`;
 }
 
