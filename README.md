@@ -72,13 +72,22 @@ only.
 
 macOS lets an app draw text in the menu bar, so you get `S: 42%  W: 18%`.
 
-Windows tray entries are a 16×16 image plus a tooltip. There is no text API. So
-Windows gets a ring icon that fills and changes colour (blue → amber → red),
-with the numbers in the tooltip and the right-click menu. Rendering digits into
-16×16 was tried and is unreadable.
+Windows has no text API for the notification area — an app gets a small image
+and a tooltip, and that is the whole contract. So the numbers ARE the icons:
+`src/main/trayicon.js` draws them into a raw BGRA bitmap by hand (no canvas in
+the main process, no image library, no 300 pre-rendered PNGs) and each shown
+meter gets its own tray entry, so three badges sit side by side.
 
-That difference is the OS, not the framework. Electron, Tauri and native code
-all hit it.
+Two digits is the ceiling. The notification area renders at 16 logical pixels
+whatever the DPI, so `S42` would be mush — the letter lives in the tooltip
+instead, and 100%+ shows as `!!`. Badges are filled with the severity colour and
+the digits are white, because the taskbar can be light or dark and an outlined
+icon would vanish for half of users.
+
+**Display → Taskbar badges** switches between one badge per meter and a single
+badge for whichever meter is closest to its limit. The single badge is clearer,
+since badges carry no letters; the three-badge view is closer to macOS.
+
 
 ## Architecture
 

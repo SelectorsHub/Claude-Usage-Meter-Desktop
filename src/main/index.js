@@ -9,8 +9,9 @@ const { Store } = require('./store');
 const { Fetcher, AuthError, ORIGIN } = require('./fetcher');
 const { extractMeters, looksLikeFreePlan, LABELS, CANONICAL_ORDER } = require('./parse');
 const { History, forecast, untilReset } = require('./forecast');
-const { macTitle, tooltip, iconState, STYLE_PREVIEWS } = require('./format');
+const { macTitle, tooltip, iconState, severity, chosenMeters, STYLE_PREVIEWS } = require('./format');
 const { checkForUpdate, notifyUpdate, openReleasesPage } = require('./update');
+const { renderBadge } = require('./trayicon');
 
 const IS_MAC = process.platform === 'darwin';
 
@@ -30,6 +31,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 if (IS_MAC && app.dock) app.dock.hide();
 
 let tray = null;
+const meterTrays = new Map();   // Windows: one tray per meter
 let store = null;
 let fetcher = null;
 let pollTimer = null;
@@ -166,6 +168,17 @@ function meterSubmenu(meter) {
   return items;
 }
 
+function chosenForTray() {
+  const chosen = chosenMeters(state.meters, store);
+  if (store.get('windowsTrayMode') === 'single') {
+    // Whichever is closest to running out is the one worth a badge.
+    return chosen.length
+      ? [chosen.reduce((a, b) => (b.pct > a.pct ? b : a))]
+      : [];
+  }
+  return chosen.slice(0, 3);
+}
+
 function buildMenu() {
   const items = [];
 
@@ -241,6 +254,28 @@ function buildMenu() {
     });
     display.push({ type: 'separator' });
   }
+  if (!IS_MAC) {
+    display.push({
+      label: 'Taskbar badges',
+      submenu: [
+        {
+          label: 'One badge per meter',
+          type: 'radio',
+          checked: store.get('windowsTrayMode') !== 'single',
+          click: () => { store.set('windowsTrayMode', 'per-meter'); destroyMeterTrays(); render(); },
+        },
+        {
+          label: 'Single badge (closest to limit)',
+          type: 'radio',
+          checked: store.get('windowsTrayMode') === 'single',
+          click: () => { store.set('windowsTrayMode', 'single'); destroyMeterTrays(); render(); },
+        },
+        { type: 'separator' },
+        { label: 'Hover a badge to see which meter it is.', enabled: false },
+      ],
+    });
+    display.push({ type: 'separator' });
+  }
   for (const key of CANONICAL_ORDER) {
     display.push({
       label: `Show ${LABELS[key]}`,
@@ -277,6 +312,53 @@ function buildMenu() {
   return Menu.buildFromTemplate(items);
 }
 
+/**
+ * Windows: give every shown meter its own tray icon, numbers drawn in.
+ *
+ * The notification area has no text API — an app gets a small image and a
+ * tooltip. So the only way to show numbers "outside" the way macOS does is to
+ * draw them into the icon, and the only way to show more than one at a time is
+ * more than one icon. Three sit side by side and read like the macOS strip.
+ *
+ * Two digits is the ceiling: the notification area renders at 16 logical pixels
+ * regardless of DPI, so "S42" would be mush. The letter lives in the tooltip
+ * and the menu instead.
+ */
+function renderWindowsTrays(stale) {
+  const chosen = chosenForTray();
+  const wanted = new Set(chosen.map((m) => m.key));
+
+  for (const [key, t] of meterTrays) {
+    if (!wanted.has(key)) {
+      t.destroy();
+      meterTrays.delete(key);
+    }
+  }
+
+  for (const meter of chosen) {
+    const role = stale ? 'stale' : severity(meter.pct, store.get('warnAt'), store.get('dangerAt'));
+    const { buffer, width, height } = renderBadge(meter.pct, role, 32);
+    const img = nativeImage.createFromBitmap(buffer, { width, height, scaleFactor: 2 });
+
+    let t = meterTrays.get(meter.key);
+    if (!t) {
+      t = new Tray(img);
+      t.on('click', () => t.popUpContextMenu());
+      meterTrays.set(meter.key, t);
+    } else {
+      t.setImage(img);
+    }
+    t.setToolTip(`${meter.label} — ${Math.round(meter.pct)}%`
+      + (meter.resetsAt ? `, resets ${untilReset(meter.resetsAt)}` : ''));
+    t.setContextMenu(buildMenu());
+  }
+}
+
+function destroyMeterTrays() {
+  for (const [, t] of meterTrays) t.destroy();
+  meterTrays.clear();
+}
+
 function render() {
   if (!tray) return;
   const stale = isStale();
@@ -289,6 +371,16 @@ function render() {
     tray.setTitle(title);
   }
   tray.setImage(trayImage(iconState(state.meters, store, stale)));
+
+  if (!IS_MAC) {
+    // The primary tray becomes the plain logo; the per-meter badges carry the
+    // numbers. Without data there is nothing to badge, so show nothing extra.
+    if (state.meters.length && !state.needsLogin && !state.freePlan) {
+      renderWindowsTrays(stale);
+    } else {
+      destroyMeterTrays();
+    }
+  }
   tray.setToolTip(
     state.needsLogin
       ? 'Claude Usage Meter — click to sign in'
@@ -480,4 +572,4 @@ app.whenReady().then(() => {
 app.on('second-instance', () => tray && tray.popUpContextMenu());
 // The tray app has no windows by design; closing them must not quit it.
 app.on('window-all-closed', (e) => e.preventDefault());
-app.on('before-quit', () => fetcher && fetcher.destroy());
+app.on('before-quit', () => { destroyMeterTrays(); if (fetcher) fetcher.destroy(); });

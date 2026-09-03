@@ -66,4 +66,4 @@ function iconState(meters, store, stale) {
   return severity(worst, warnAt, dangerAt);
 }
 
-module.exports = { macTitle, tooltip, iconState, severity, STYLES, STYLE_PREVIEWS };
+module.exports = { macTitle, tooltip, iconState, severity, chosenMeters, STYLES, STYLE_PREVIEWS };

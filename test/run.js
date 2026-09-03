@@ -219,6 +219,53 @@ test('an unrecognised response is a parser failure, not a free plan', () => {
   assert.strictEqual(looksLikeFreePlan(null), false);
 });
 
+console.log('tray icon');
+
+const { renderBadge, digitsFor } = require('../src/main/trayicon');
+
+test('badge buffer is the right size and fully BGRA', () => {
+  const { buffer, width, height } = renderBadge(42, 'normal', 32);
+  assert.strictEqual(width, 32);
+  assert.strictEqual(height, 32);
+  assert.strictEqual(buffer.length, 32 * 32 * 4);
+});
+
+test('three digits cannot fit, so 100+ becomes a marker', () => {
+  // The notification area renders at 16 logical px whatever the DPI. "100"
+  // there is unreadable, so it must not be attempted.
+  assert.strictEqual(digitsFor(100), '!!');
+  assert.strictEqual(digitsFor(137), '!!');
+  assert.strictEqual(digitsFor(99), '99');
+  assert.strictEqual(digitsFor(99.6), '!!');
+  assert.strictEqual(digitsFor(0), '0');
+  assert.strictEqual(digitsFor(-5), '0');
+});
+
+test('severity changes the badge colour', () => {
+  const px = (sev) => {
+    const b = renderBadge(50, sev, 32).buffer;
+    const i = (16 * 32 + 3) * 4;      // inside the fill, clear of the digits
+    return [b[i + 2], b[i + 1], b[i]]; // BGRA -> RGB
+  };
+  assert.notDeepStrictEqual(px('normal'), px('danger'));
+  assert.notDeepStrictEqual(px('warn'), px('danger'));
+  assert.deepStrictEqual(px('danger'), [0xe2, 0x4c, 0x3e]);
+});
+
+test('digits are opaque white so they read on any taskbar', () => {
+  const { buffer } = renderBadge(88, 'normal', 32);
+  let white = 0;
+  for (let i = 0; i < buffer.length; i += 4) {
+    if (buffer[i] > 250 && buffer[i + 1] > 250 && buffer[i + 2] > 250 && buffer[i + 3] === 255) white++;
+  }
+  assert.ok(white > 60, `expected solid white glyph pixels, found ${white}`);
+});
+
+test('corners stay transparent so the badge looks rounded', () => {
+  const { buffer } = renderBadge(50, 'normal', 32);
+  assert.strictEqual(buffer[3], 0, 'top-left corner should be transparent');
+});
+
 console.log('oauth');
 
 // fetcher.js requires 'electron', which does not exist under plain node. Serve

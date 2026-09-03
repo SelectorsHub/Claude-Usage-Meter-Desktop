@@ -16,6 +16,10 @@ const DEFAULTS = {
   // 'logo' shows the gauge glyph before the numbers, 'none' is text only.
   // Windows ignores this: its tray has no text, so it always needs an icon.
   macTrayIcon: 'logo',
+  // Windows only. 'per-meter' gives each shown meter its own numbered badge,
+  // closest to the macOS strip. 'single' shows one badge for whichever meter is
+  // closest to its limit — clearer, since badges carry no letters at 16px.
+  windowsTrayMode: 'per-meter',
   warnAt: 80,
   dangerAt: 95,
   forecastWindowMinutes: 120,
