@@ -1,7 +1,30 @@
-'use strict';
 /* Verifies the logic that was ported from the Python build. */
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+// Preflight: a missing module here produces an unreadable MODULE_NOT_FOUND
+// stack. Copying a partial src/ over the repo is easy to do by accident —
+// dragging a folder in Finder REPLACES it rather than merging, so a partial
+// copy silently deletes the files it does not contain. Name them instead.
+const REQUIRED = [
+  'src/main/index.js', 'src/main/parse.js', 'src/main/forecast.js',
+  'src/main/fetcher.js', 'src/main/format.js', 'src/main/store.js',
+  'src/main/update.js', 'src/main/trayicon.js',
+  'assets/tray/normal.png', 'assets/tray/trayTemplate.png',
+];
+const root = path.join(__dirname, '..');
+const missing = REQUIRED.filter((f) => !fs.existsSync(path.join(root, f)));
+if (missing.length) {
+  console.error('\nMissing files — the working copy is incomplete:\n');
+  for (const f of missing) console.error('  - ' + f);
+  console.error('\nRe-copy the full project. If you dragged a folder in Finder,'
+    + '\nit replaced the destination instead of merging into it.\n');
+  process.exit(1);
+}
+
+
 const { extractMeters, looksLikeFreePlan } = require('../src/main/parse');
 const { History, forecast, untilReset } = require('../src/main/forecast');
 
