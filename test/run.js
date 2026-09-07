@@ -25,7 +25,7 @@ if (missing.length) {
 }
 
 
-const { extractMeters, looksLikeFreePlan } = require('../src/main/parse');
+const { extractMeters, looksLikeFreePlan, hasUsageData } = require('../src/main/parse');
 const { History, forecast, untilReset } = require('../src/main/forecast');
 
 let passed = 0;
@@ -305,7 +305,7 @@ const _load = Module._load;
 Module._load = function (request, ...rest) {
   return request === 'electron' ? electronStub : _load.call(this, request, ...rest);
 };
-const { hostAllowed } = require('../src/main/fetcher');
+const { hostAllowed, rankOrgs } = require('../src/main/fetcher');
 Module._load = _load;
 
 test('Google OAuth popups are allowed to open in-app', () => {
@@ -328,6 +328,77 @@ test('lookalike domains and non-http schemes are rejected', () => {
   for (const u of ['https://accounts.google.com.evil.tld/x', 'https://fakeclaude.ai.co/x',
                    'javascript:alert(1)', 'file:///etc/passwd'])
     assert.ok(!hostAllowed(u), u);
+});
+
+console.log('\norg selection');
+
+// The v1.0.3 bug, verbatim: a Team member's account. Both orgs advertise
+// `chat`, so the old scoring tied and kept whichever came first — the personal
+// org, which reports no usage. The account was then declared "Free plan".
+const TEAM_ACCOUNT = [
+  { uuid: 'personal-1', name: 'Sanjay', capabilities: ['chat'] },
+  { uuid: 'team-1', name: 'Acme Inc', capabilities: ['chat', 'claude_team'], member_count: 12 },
+];
+
+test('a Team workspace outranks the personal org it ties with', () => {
+  assert.strictEqual(rankOrgs(TEAM_ACCOUNT)[0].uuid, 'team-1');
+});
+
+test('ordering from the API cannot decide the plan', () => {
+  // Same two orgs, reversed. The old reduce() returned a different winner for
+  // each order; ranking must not.
+  const forward = rankOrgs(TEAM_ACCOUNT)[0].uuid;
+  const reversed = rankOrgs([...TEAM_ACCOUNT].reverse())[0].uuid;
+  assert.strictEqual(forward, reversed);
+});
+
+test('an Enterprise seat is preferred over a personal org', () => {
+  const ranked = rankOrgs([
+    { uuid: 'p', name: 'Me', capabilities: ['chat'] },
+    { uuid: 'e', name: 'BigCo', capabilities: ['chat', 'claude_enterprise'] },
+  ]);
+  assert.strictEqual(ranked[0].uuid, 'e');
+});
+
+test('an unannounced claude_* tier still counts as paid', () => {
+  const ranked = rankOrgs([
+    { uuid: 'p', name: 'Me', capabilities: ['chat'] },
+    { uuid: 'x', name: 'New Tier', capabilities: ['chat', 'claude_max_20x'] },
+  ]);
+  assert.strictEqual(ranked[0].uuid, 'x');
+});
+
+test('an API-only console org never wins over a chat org', () => {
+  const ranked = rankOrgs([
+    { uuid: 'api-1', name: 'Console', capabilities: ['api'] },
+    { uuid: 'chat-1', name: 'Me', capabilities: ['chat'] },
+  ]);
+  assert.strictEqual(ranked[0].uuid, 'chat-1');
+  assert.strictEqual(ranked[ranked.length - 1].uuid, 'api-1');
+});
+
+test('every org is kept as a probe candidate, not just the winner', () => {
+  // The prober needs the whole list — the heuristic is a starting order, and
+  // the org that actually returns usage is the one that wins.
+  assert.strictEqual(rankOrgs(TEAM_ACCOUNT).length, 2);
+});
+
+test('orgs without a uuid or capabilities do not crash the ranking', () => {
+  const ranked = rankOrgs([null, {}, { id: 'legacy', name: 'Old' }, 'nonsense']);
+  assert.strictEqual(ranked.length, 1);
+  assert.strictEqual(ranked[0].uuid, 'legacy');
+});
+
+test('empty and malformed org lists rank to nothing', () => {
+  for (const input of [[], null, undefined, {}]) {
+    assert.deepStrictEqual(rankOrgs(input), []);
+  }
+});
+
+test('hasUsageData agrees with the meters the UI shows', () => {
+  assert.strictEqual(hasUsageData(require('./fixtures/usage.json')), true);
+  assert.strictEqual(hasUsageData({ five_hour: null, seven_day: null, limits: [] }), false);
+  assert.strictEqual(hasUsageData(null), false);
 });
 
 console.log(`\n${passed} passed`);

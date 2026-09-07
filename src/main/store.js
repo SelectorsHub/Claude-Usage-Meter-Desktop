@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
 
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 
 const DEFAULTS = {
   pollSeconds: 120,
@@ -24,6 +24,11 @@ const DEFAULTS = {
   dangerAt: 95,
   forecastWindowMinutes: 120,
   orgUuid: null,
+  // Display name of the org we're reading, for the account switcher.
+  orgName: null,
+  // True only when the user picked the org by hand. Their choice is then left
+  // alone even if it reports no usage.
+  orgPinnedByUser: false,
   startAtLogin: true,
   firstRunDone: false,
   freeNoticeShown: false,
@@ -63,6 +68,22 @@ class Store {
       if (raw.macTrayIcon === 'none' || raw.macTrayIcon === undefined) {
         this.data.macTrayIcon = 'logo';
       }
+      changed = true;
+    }
+    if (version < 3) {
+      // v1.0.3 and earlier could pin the wrong organization: a Team member
+      // also belongs to the personal org created at signup, and the old tie
+      // break picked whichever the API listed first. That org reports no
+      // usage, so the app called a paying Team account "Free plan" — and
+      // cached the bad uuid, so it stayed wrong across restarts. Drop the pin
+      // and let the prober re-resolve it. Anything the user pinned by hand
+      // predates that flag, so it cannot be a deliberate choice.
+      this.data.orgUuid = null;
+      this.data.orgName = null;
+      this.data.orgPinnedByUser = false;
+      // The free-plan notice was very likely shown in error. Let it fire again
+      // if — and only if — the account really is on a free plan.
+      this.data.freeNoticeShown = false;
       changed = true;
     }
     if (changed) this.data.settingsVersion = SETTINGS_VERSION;

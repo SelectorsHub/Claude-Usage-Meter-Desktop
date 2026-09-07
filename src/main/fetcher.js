@@ -9,9 +9,26 @@
  */
 
 const { BrowserWindow, session, shell } = require('electron');
+const { hasUsageData } = require('./parse');
 
 const ORIGIN = 'https://claude.ai';
 const PARTITION = 'persist:claude';
+
+// How many organizations we are willing to probe in one pass. Accounts with a
+// long list of Team/Enterprise memberships exist; hammering /usage for every
+// one of them on a failed poll is not worth it.
+const MAX_PROBE_ORGS = 8;
+
+// Capabilities that mark an org as a paid Claude.ai workspace. Anthropic has
+// added tiers without warning before, so `/^claude_/` catches new ones too.
+const PAID_CAPS = new Set([
+  'claude_pro', 'claude_max', 'claude_team', 'claude_enterprise',
+  'pro', 'max', 'team', 'enterprise', 'raven',
+]);
+
+// Console / developer-platform orgs. They answer /api/organizations but have
+// no chat usage windows at all, so they must never be picked over a chat org.
+const API_ONLY_CAPS = new Set(['api', 'developer_platform', 'console']);
 
 // Sign-in providers whose pages must open INSIDE the app, sharing our cookie
 // jar. "Continue with Google" opens a popup via window.open; with no handler
@@ -75,11 +92,69 @@ const JS_USAGE = (orgId) => `
 
 class AuthError extends Error {}
 
+function orgCaps(org) {
+  const caps = Array.isArray(org.capabilities) ? org.capabilities : [];
+  return caps.map((c) => String(c).toLowerCase());
+}
+
+/**
+ * Rank the account's organizations, best candidate first.
+ *
+ * A Team member almost always belongs to at least TWO orgs: the personal one
+ * created for them at signup, and the Team workspace. The old scoring gave
+ * both +2 for the `chat` capability and then used `reduce` with a strict `>`,
+ * which keeps the FIRST element on a tie — so whichever order the API happened
+ * to return decided the account's plan. When the personal org came first we
+ * queried its /usage, got an empty payload, and reported "Free plan" to
+ * someone paying for Team.
+ *
+ * This ordering is a heuristic and deliberately never the final word. The
+ * capability strings are undocumented and change; `poll()` treats this list as
+ * a probe order and lets the org that actually returns usage data win.
+ */
+function rankOrgs(orgs) {
+  if (!Array.isArray(orgs)) return [];
+
+  return orgs
+    .filter((o) => o && typeof o === 'object' && (o.uuid || o.id))
+    .map((org, index) => {
+      const caps = orgCaps(org);
+      // No capabilities field at all is old-shape, not disqualifying.
+      const chat = caps.length === 0 || caps.includes('chat');
+      const apiOnly = caps.length > 0 && !chat && caps.some((c) => API_ONLY_CAPS.has(c));
+      const type = String(
+        org.organization_type || org.billing_type || org.raw_type || ''
+      ).toLowerCase();
+
+      let score = 0;
+      if (chat) score += 4;
+      if (apiOnly) score -= 8;
+      if (caps.some((c) => PAID_CAPS.has(c) || /^claude_(pro|max|team|enterprise)/.test(c))) {
+        score += 6;
+      }
+      if (/team|enterprise|business/.test(type)) score += 5;
+      // A personal org has one seat; a Team workspace has more. Only counts
+      // when the field is actually present.
+      if (Number(org.member_count) > 1) score += 3;
+
+      return {
+        uuid: org.uuid || org.id,
+        name: typeof org.name === 'string' && org.name ? org.name : '(unnamed)',
+        caps,
+        score,
+        index,
+      };
+    })
+    // Stable: equal scores keep API order, so behaviour stays predictable.
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+}
+
 class Fetcher {
   constructor(store) {
     this.store = store;
     this.window = null;
     this.orgUuid = store.get('orgUuid') || null;
+    this.candidates = null;
     this.lastDiagnostic = {};
   }
 
@@ -167,13 +242,8 @@ class Fetcher {
     return win.webContents.executeJavaScript(script, true);
   }
 
-  async resolveOrg(win, { force = false } = {}) {
-    if (!force) {
-      const pinned = this.store.get('orgUuid');
-      if (pinned) return pinned;
-      if (this.orgUuid) return this.orgUuid;
-    }
-
+  /** Every organization this session can see, ranked as a probe order. */
+  async resolveCandidates(win) {
     const res = await this.run(win, JS_ORGS);
     this.lastDiagnostic.organizations = { status: res.status, sample: res.sample };
 
@@ -188,14 +258,30 @@ class Fetcher {
       throw new AuthError('No organizations returned — session looks signed out.');
     }
 
-    const score = (org) => {
-      const caps = (org.capabilities || []).map((c) => String(c).toLowerCase());
-      return (caps.includes('chat') ? 2 : 0) - (caps.includes('api') ? 1 : 0);
-    };
-    const best = orgs.reduce((a, b) => (score(b) > score(a) ? b : a));
-    this.orgUuid = best.uuid || best.id;
+    const ranked = rankOrgs(orgs);
+    if (!ranked.length) {
+      throw new AuthError('No usable organizations returned — session looks signed out.');
+    }
+    this.candidates = ranked;
+    this.lastDiagnostic.orgChoices = ranked.map((o) => ({
+      name: o.name, uuid: o.uuid, caps: o.caps, score: o.score,
+    }));
+    return ranked;
+  }
+
+  /** The org list for the account switcher, fetched if we don't have one yet. */
+  async listOrgs() {
+    if (this.candidates) return this.candidates;
+    const win = await this.ensureWindow();
+    return this.resolveCandidates(win);
+  }
+
+  /** Pin an org the user chose explicitly, and stop second-guessing it. */
+  setOrg(uuid, name) {
+    this.orgUuid = uuid || null;
     this.store.set('orgUuid', this.orgUuid);
-    return this.orgUuid;
+    this.store.set('orgName', name || null);
+    this.store.set('orgPinnedByUser', Boolean(uuid));
   }
 
   async fetchUsage(win, orgId) {
@@ -208,14 +294,68 @@ class Fetcher {
     return res.body;
   }
 
-  /** One full poll. Throws AuthError when the session is genuinely rejected. */
+  /**
+   * One full poll. Throws AuthError when the session is genuinely rejected.
+   *
+   * The steady-state path is one request: the org we already know reports
+   * usage. Only when that org comes back empty do we spend requests looking at
+   * the others — which is what makes a Team account self-correct instead of
+   * sitting on "Free plan" forever.
+   *
+   * `probed: true` means every org this account can see was checked and none
+   * of them reported a usage window. That, and only that, is grounds for the
+   * caller to say "free plan".
+   */
   async poll() {
     const win = await this.ensureWindow();
     if (!win.webContents.getURL().startsWith(ORIGIN)) {
       await win.loadURL(ORIGIN + '/');
     }
-    const org = await this.resolveOrg(win);
-    return { raw: await this.fetchUsage(win, org), orgUuid: org };
+
+    const pinned = this.store.get('orgUuid') || this.orgUuid;
+    let fallback = null;
+
+    if (pinned) {
+      const raw = await this.fetchUsage(win, pinned);
+      if (hasUsageData(raw)) {
+        this.orgUuid = pinned;
+        return { raw, orgUuid: pinned, probed: false };
+      }
+      // A choice the user made by hand is theirs to keep. Report it empty
+      // rather than silently wandering off to a different workspace.
+      if (this.store.get('orgPinnedByUser')) {
+        return { raw, orgUuid: pinned, probed: true, userPinned: true };
+      }
+      fallback = { raw, orgUuid: pinned };
+    }
+
+    // Either nothing pinned, or the pinned org went quiet — re-read the list
+    // rather than trusting a cache that may predate joining a Team.
+    const candidates = await this.resolveCandidates(win);
+    let lastError = null;
+
+    for (const cand of candidates.slice(0, MAX_PROBE_ORGS)) {
+      if (cand.uuid === pinned) continue;   // already tried above
+      let raw;
+      try {
+        raw = await this.fetchUsage(win, cand.uuid);
+      } catch (err) {
+        // One org 403ing (a Console org, or one we lack a seat on) must not
+        // sink the whole poll — the next candidate may be the right one.
+        lastError = err;
+        continue;
+      }
+      if (hasUsageData(raw)) {
+        this.orgUuid = cand.uuid;
+        this.store.set('orgUuid', cand.uuid);
+        this.store.set('orgName', cand.name);
+        return { raw, orgUuid: cand.uuid, orgName: cand.name, probed: true };
+      }
+      if (!fallback) fallback = { raw, orgUuid: cand.uuid };
+    }
+
+    if (fallback) return { ...fallback, probed: true };
+    throw lastError || new AuthError('No organization returned usage data.');
   }
 
   /**
@@ -225,7 +365,10 @@ class Fetcher {
    */
   async signIn(onDone) {
     this.orgUuid = null;
+    this.candidates = null;
     this.store.set('orgUuid', null);
+    this.store.set('orgName', null);
+    this.store.set('orgPinnedByUser', false);
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
 
     const win = this.createWindow({ show: true });
@@ -241,8 +384,9 @@ class Fetcher {
         return onDone(false);
       }
       try {
-        const org = await this.resolveOrg(win, { force: true });
-        await this.fetchUsage(win, org);
+        // Validate end to end through the same path a real poll takes, so a
+        // session that only half works never closes the sign-in window.
+        await this.poll();
         win.hide();
         win.setSkipTaskbar(true);
         return onDone(true);
@@ -264,7 +408,10 @@ class Fetcher {
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
     this.window = null;
     this.orgUuid = null;
+    this.candidates = null;
     this.store.set('orgUuid', null);
+    this.store.set('orgName', null);
+    this.store.set('orgPinnedByUser', false);
     try {
       await session.fromPartition(PARTITION).clearStorageData({
         storages: ['cookies', 'localstorage', 'indexdb', 'websql', 'serviceworkers', 'cachestorage'],
@@ -280,4 +427,6 @@ class Fetcher {
   }
 }
 
-module.exports = { Fetcher, AuthError, ORIGIN, PARTITION, hostAllowed, AUTH_HOSTS };
+module.exports = {
+  Fetcher, AuthError, ORIGIN, PARTITION, hostAllowed, AUTH_HOSTS, rankOrgs,
+};

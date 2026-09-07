@@ -329,7 +329,19 @@ function looksLikeFreePlan(raw) {
   return true;
 }
 
+/**
+ * Does this payload contain any usage window at all?
+ *
+ * The fetcher uses this to decide whether an organization is the one actually
+ * reporting usage. It has to be the same test the UI applies, or the two can
+ * disagree — the fetcher accepting an org whose payload the parser then finds
+ * empty is exactly the "Free plan" bug.
+ */
+function hasUsageData(raw) {
+  return extractMeters(raw).length > 0;
+}
+
 module.exports = {
-  extractMeters, fromLimitsArray, looksLikeFreePlan,
+  extractMeters, fromLimitsArray, looksLikeFreePlan, hasUsageData,
   CANONICAL_ORDER, LABELS, SHORT, prettyLabel, classify,
 };

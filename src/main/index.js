@@ -44,6 +44,7 @@ const state = {
   needsLogin: false,
   updateAvailable: null,
   lastRaw: null,
+  orgName: null,
 };
 
 const isStale = () => !state.lastOkAt || Date.now() - state.lastOkAt > STALE_AFTER;
@@ -79,8 +80,9 @@ function notify(title, body) {
 
 async function poll() {
   try {
-    const { raw } = await fetcher.poll();
-    applyResult(raw);
+    const { raw, probed, orgName } = await fetcher.poll();
+    if (orgName) state.orgName = orgName;
+    applyResult(raw, { probed });
   } catch (err) {
     if (err instanceof AuthError) {
       state.needsLogin = true;
@@ -101,7 +103,7 @@ async function poll() {
   }
 }
 
-function applyResult(raw) {
+function applyResult(raw, meta = {}) {
   state.lastRaw = raw;
   const meters = extractMeters(raw);
   const windowMinutes = store.get('forecastWindowMinutes');
@@ -126,10 +128,19 @@ function applyResult(raw) {
   if (meters.length) {
     state.freePlan = false;
     state.lastError = null;
-  } else if (looksLikeFreePlan(raw)) {
+  } else if (looksLikeFreePlan(raw) && meta.probed !== false) {
+    // An empty payload only means "free plan" once every organization on the
+    // account has been checked. A Team member also owns a personal org, and
+    // that one is empty — reading it alone is how a paid account got told it
+    // was free. `probed` is the fetcher confirming it looked at all of them.
     state.freePlan = true;
     state.lastError = null;
     showFreePlanNotice();
+  } else if (looksLikeFreePlan(raw)) {
+    // Familiar but empty, and we have not yet looked elsewhere. Say nothing
+    // about the plan; the next poll re-probes and settles it.
+    state.freePlan = false;
+    state.lastError = 'No usage in the selected workspace — checking your other accounts…';
   } else {
     // Empty but unfamiliar — that's us failing to parse, not the user's plan.
     state.freePlan = false;
@@ -204,6 +215,9 @@ function buildMenu() {
         ],
       },
       { label: 'Upgrade your Claude plan…', click: () => shell.openExternal(ORIGIN + '/settings/billing') },
+      // On a paid plan and still seeing this? The wrong workspace is being
+      // read. Let them say so directly rather than reinstalling.
+      { label: 'On a paid plan? Choose workspace…', click: chooseOrg },
       { label: 'Sign in with another account', click: signOut },
       { type: 'separator' },
     );
@@ -228,6 +242,17 @@ function buildMenu() {
   if (state.lastError) {
     items.push({ label: `⚠ ${state.lastError.slice(0, 60)}`, enabled: false });
   }
+  // Which workspace these numbers belong to. Worth stating plainly: an account
+  // with a personal org and a Team seat has two, and only one has the limits
+  // the user cares about.
+  const orgName = state.orgName || store.get('orgName');
+  items.push({
+    label: orgName ? `Workspace: ${orgName}` : 'Workspace: choosing automatically…',
+    submenu: [
+      { label: 'Choose workspace…', click: chooseOrg },
+      { label: 'Sign in with another account', click: signOut },
+    ],
+  });
   items.push({ label: 'Refresh now', click: poll }, { type: 'separator' });
 
   const display = [];
@@ -492,9 +517,62 @@ function copyDiagnostics() {
     needsLogin: state.needsLogin,
     lastError: state.lastError,
     meters: state.meters.map((m) => [m.key, m.pct, m.path]),
+    orgUuid: store.get('orgUuid'),
+    orgName: store.get('orgName'),
+    orgPinnedByUser: store.get('orgPinnedByUser'),
     lastFetch: fetcher.lastDiagnostic,
   }, null, 2));
   notify('Claude Usage Meter', 'Diagnostics copied to clipboard.');
+}
+
+/**
+ * Let the user pick which workspace to read.
+ *
+ * Automatic selection probes every org and takes the one reporting usage, which
+ * is right almost always. It cannot be right when an account has two orgs that
+ * BOTH report usage — a personal Pro plan plus a Team seat, say — because only
+ * the user knows which one they meant. This is that escape hatch.
+ */
+async function chooseOrg() {
+  let orgs;
+  try {
+    orgs = await fetcher.listOrgs();
+  } catch (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      title: 'Claude Usage Meter',
+      message: 'Could not list your workspaces',
+      detail: err.message,
+    });
+    return;
+  }
+
+  const current = store.get('orgUuid');
+  const labels = orgs.map((o) => (o.uuid === current ? `${o.name}  (current)` : o.name));
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    title: 'Claude Usage Meter',
+    message: 'Which workspace should the meter read?',
+    detail: 'Team and Enterprise members also have a personal workspace, which '
+      + 'reports no usage. Pick the one whose limits you want to watch.',
+    buttons: [...labels, 'Automatic', 'Cancel'],
+    defaultId: 0,
+    cancelId: labels.length + 1,
+  });
+
+  if (response === labels.length + 1) return;
+  if (response === labels.length) {
+    fetcher.setOrg(null, null);          // back to probing
+  } else {
+    const picked = orgs[response];
+    fetcher.setOrg(picked.uuid, picked.name);
+    state.orgName = picked.name;
+  }
+  state.freePlan = false;
+  state.meters = [];
+  state.histories.clear();
+  render();
+  poll();
 }
 
 function firstRun() {
