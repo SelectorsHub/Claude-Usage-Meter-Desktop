@@ -16,7 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # Pinned, NOT macos-latest. macos-latest now resolves to macOS 26
+          # (Tahoe), where electron-builder 25.x fails code signing at
+          # `security set-key-partition-list` with SecKeychainUnlock. The certs
+          # and secrets are fine; the runner image is the regression. Revisit
+          # once electron-builder ships Tahoe support, then drop this pin.
+          - os: macos-15
             script: dist:mac
           - os: windows-latest
             script: dist:win
@@ -67,7 +72,7 @@ jobs:
       # so the DMG itself never gets a ticket. Staple one on so the download
       # verifies offline.
       - name: Notarize and staple the DMGs
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         shell: bash
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -94,7 +99,7 @@ jobs:
       # electron-builder leaves dmg.sign off by default. That is expected and is
       # NOT a failure; the DMG carries a notarization ticket, not a signature.
       - name: Verify the app Gatekeeper will see
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
           set -euo pipefail
