@@ -13,6 +13,12 @@ const REQUIRED = [
   'src/main/fetcher.js', 'src/main/format.js', 'src/main/store.js',
   'src/main/update.js', 'src/main/trayicon.js',
   'assets/tray/normal.png', 'assets/tray/trayTemplate.png',
+  // The preflight guards src/ but used to skip test/, so replacing the test
+  // folder took fixtures/ with it and the suite died on a MODULE_NOT_FOUND
+  // stack halfway through — interleaved with passing output, which reads like
+  // a broken test rather than a missing file. A folder replace can hit any
+  // directory in the project, so every directory needs a sentinel here.
+  'test/fixtures/usage.json',
 ];
 const root = path.join(__dirname, '..');
 const missing = REQUIRED.filter((f) => !fs.existsSync(path.join(root, f)));
